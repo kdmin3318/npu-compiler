@@ -26,8 +26,8 @@ def main() -> None:
         str(MODEL_PATH),
         input_names=["input"],
         output_names=["output"],
-        opset_version=17,
-        dynamo=False,
+        opset_version=18,
+        dynamo=True,
     )
     print(f"Exported MobileNetV2 to {MODEL_PATH}")
 
