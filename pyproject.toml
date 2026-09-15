@@ -1,0 +1,12 @@
+[project]
+name = "npu-compiler"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.12"
+dependencies = [
+    "netron>=9.2.8",
+    "onnx>=1.22.0",
+    "onnxruntime>=1.30.0",
+    "torch>=2.14.0",
+    "torchvision>=0.29.0",
+]
