@@ -31,4 +31,23 @@ def is_depthwise_conv(node: onnx.NodeProto) -> bool:
     Returns:
         depthwise conv이면 True, 아니면 False
     """
-    raise NotImplementedError("TODO: 직접 구현하세요")
+    # 초기 동민 ver.
+    # if node.op_type != "Conv": #node.op_type의 종류: Conv, Clip, Add, ReduceMean, Reshape, Gemm
+    #     return False
+    # if not node.attribute: #속성이 없으면 안됌
+    #     return False
+    # pos_attr = False
+    # for attr in node.attribute:
+    #     if attr.name == "group": #group이 1이면 일반 conv
+    #         pos_attr = True
+    #         if attr.i == 1:
+    #           return False
+    #         break
+    
+    # return pos_attr#나머지 경우는 depthwise conv로 간주
+
+    # 정석 ver.
+    if node.op_type != "Conv":
+        return False
+    group = next((attr.i for attr in node.attribute if attr.name == "group"), 1)
+    return group > 1
