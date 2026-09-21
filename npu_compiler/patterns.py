@@ -148,3 +148,50 @@ def match_inverted_residual(
         blocks.append({"type": block_type, "nodes": block_nodes})
 
     return blocks
+
+
+def build_fused_node(block: dict) -> onnx.NodeProto:
+    """블록 하나(match_inverted_residual의 결과 원소 하나)를 대표하는
+    커스텀 fused 노드 하나를 만든다.
+
+    TODO: 직접 구현하세요.
+
+    접근 방법 힌트:
+    - `block["nodes"]`는 이 블록에 속한 노드들의 **순서 있는** 리스트입니다.
+    - 이 블록의 진짜 입력(block_input) = **첫 번째 노드의 input[0]**
+      (Type A/B/C 상관없이 첫 노드가 뭐든 그 노드의 input[0]이 곧 block_input
+      입니다 — match_inverted_residual에서 이미 확인한 사실을 재사용하는 것)
+    - 이 블록의 진짜 출력 = **마지막 노드의 output[0]**
+      (Type C면 마지막이 Add, 아니면 project Conv)
+    - weight/bias 입력들: `block["nodes"]` 중 op_type이 "Conv"인 것들의
+      `input[1:]` (즉 데이터 입력인 input[0]은 빼고)를 순서대로 모으면 됩니다.
+    - 최종 `inputs` = `[block_input]` + 모든 weight/bias 이름들
+    - **입출력 텐서 이름을 원래 이름 그대로 재사용하면**(새로 이름을 짓지
+      않고), 이 fused 노드 뒤에 연결된 다른 노드들(다음 블록, 또는 residual
+      로 이 출력을 갖다 쓰는 나중 블록)이 아무것도 안 바꿔도 자동으로 계속
+      연결됩니다 — 그래프 재작성(2번 함수)을 훨씬 쉽게 만들어주는 포인트
+      입니다.
+    - `onnx.helper.make_node(op_type, inputs, outputs, name=..., domain=...)`
+      로 노드를 만듭니다. 표준 op이 아니니 domain을 커스텀 값(예:
+      "com.npu_compiler")으로 지정하세요.
+    - `block["type"]`도 나중에 확인하기 편하게 attribute로 같이 넣어두면
+      좋습니다 (`make_node`에 정의 안 된 키워드 인자를 추가로 넘기면
+      자동으로 attribute가 됩니다, 예: `make_node(..., block_type=block["type"])`).
+
+    Args:
+        block: {"type": "A"/"B"/"C", "nodes": [...]} 형태의 dict
+
+    Returns:
+        onnx.NodeProto — 이 블록을 대표하는 커스텀 fused 노드 하나
+    """
+    weights = []
+    for node in block["nodes"]:
+        if node.op_type == "Conv":
+            weights.extend(node.input[1:]) # weight/bias만 모음
+    fused_node = onnx.helper.make_node(
+        op_type = "Inverted_residual",
+        inputs = [block["nodes"][0].input[0]] + weights,
+        outputs = [block["nodes"][-1].output[0]], 
+        domain = "com.npu_compiler",
+    )
+    return fused_node
