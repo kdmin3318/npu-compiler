@@ -195,3 +195,66 @@ def build_fused_node(block: dict) -> onnx.NodeProto:
         domain = "com.npu_compiler",
     )
     return fused_node
+
+
+def rewrite_graph(graph: onnx.GraphProto, blocks: list[dict]) -> onnx.GraphProto:
+    """매칭된 블록들을 fused 노드로 교체한 새 그래프를 만들어 반환한다.
+
+    TODO: 직접 구현하세요.
+
+    접근 방법 힌트:
+    1. 각 블록마다 build_fused_node(block)으로 fused 노드를 미리 만들어
+       둔다 (예: block마다 하나씩, 리스트나 dict로 준비).
+
+    2. "어떤 노드가 어떤 블록에 속하는지" 빠르게 찾을 수 있는 인덱스를
+       만든다. NodeProto는 파이썬 딕셔너리 키로 바로 못 쓰니(해시 불가),
+       id(node)(객체의 메모리 주소, 정수라서 해시 가능)를 키로 쓰세요.
+       예: {id(node): block_index
+            for block_index, block in enumerate(blocks)
+            for node in block["nodes"]}
+
+    3. graph.node를 원래 순서대로 순회하면서 새 노드 리스트를 만든다:
+       - 이 노드가 어떤 블록에도 안 속하면 -> 그대로 새 리스트에 추가
+       - 이 노드가 어떤 블록에 속하면 -> 그 블록의 fused 노드를 **딱 한
+         번만** 새 리스트에 추가하고, 같은 블록의 나머지 노드들은
+         건너뛴다 (이미 그 블록의 fused 노드를 추가했으면 또 추가하면
+         안 됨 — 어떤 블록을 이미 처리했는지 추적하는 집합(set)이 필요할
+         수 있습니다).
+
+    4. onnx.helper.make_graph()로 새 GraphProto를 만든다. graph.initializer,
+       graph.input, graph.output은 안 바뀌었으니 그대로 재사용하고,
+       node만 3번에서 만든 새 리스트로 넣으면 됩니다. graph.node에
+       직접 대입(`graph.node = ...`)은 안 되니 주의하세요 (반복 필드라서).
+
+    Args:
+        graph: 원본 onnx.GraphProto (이 함수 안에서 직접 수정하지 않는다)
+        blocks: match_inverted_residual()의 결과
+
+    Returns:
+        onnx.GraphProto — 블록들이 fused 노드로 교체된 새 그래프
+    """
+    fused_nodes = [build_fused_node(block) for block in blocks]
+
+    node_to_block_index = {
+        id(node): block_index
+        for block_index, block in enumerate(blocks)
+        for node in block["nodes"]
+    }
+
+    new_nodes = []
+    inserted_block_indices = set()
+    for node in graph.node:
+        block_index = node_to_block_index.get(id(node))
+        if block_index is None:
+            new_nodes.append(node)
+        elif block_index not in inserted_block_indices:
+            new_nodes.append(fused_nodes[block_index])
+            inserted_block_indices.add(block_index)
+
+    return onnx.helper.make_graph(
+        new_nodes,
+        graph.name,
+        graph.input,
+        graph.output,
+        initializer=graph.initializer,
+    )
