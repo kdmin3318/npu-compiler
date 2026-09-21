@@ -184,6 +184,11 @@ def build_fused_node(block: dict) -> onnx.NodeProto:
     Returns:
         onnx.NodeProto — 이 블록을 대표하는 커스텀 fused 노드 하나
     """
+    # TODO(알려진 한계): Clip(활성화 함수)의 min/max 값은 지금 attribute로
+    # 안 담고, "expand/depthwise 뒤엔 항상 ReLU6(0~6)"라는 가정에 기대고
+    # 있음. MobileNetV2 전체 Clip 35개가 전부 같은 min/max를 써서 지금은
+    # 문제 없지만, h-swish처럼 활성화가 다양한 모델(MobileNetV3 등)로
+    # 확장하면 이 가정이 깨지니 그때 min/max도 attribute로 담도록 고칠 것.
     weights = []
     for node in block["nodes"]:
         if node.op_type == "Conv":
@@ -191,8 +196,9 @@ def build_fused_node(block: dict) -> onnx.NodeProto:
     fused_node = onnx.helper.make_node(
         op_type = "Inverted_residual",
         inputs = [block["nodes"][0].input[0]] + weights,
-        outputs = [block["nodes"][-1].output[0]], 
+        outputs = [block["nodes"][-1].output[0]],
         domain = "com.npu_compiler",
+        block_type = block["type"],
     )
     return fused_node
 
