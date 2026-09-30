@@ -150,7 +150,7 @@ def match_inverted_residual(
     return blocks
 
 
-def build_fused_node(block: dict) -> onnx.NodeProto:
+def build_fused_node(block: dict, domain: str = "com.npu_compiler") -> onnx.NodeProto:
     """블록 하나(match_inverted_residual의 결과 원소 하나)를 대표하는
     커스텀 fused 노드 하나를 만든다.
 
@@ -190,15 +190,20 @@ def build_fused_node(block: dict) -> onnx.NodeProto:
     # 문제 없지만, h-swish처럼 활성화가 다양한 모델(MobileNetV3 등)로
     # 확장하면 이 가정이 깨지니 그때 min/max도 attribute로 담도록 고칠 것.
     weights = []
+    dw_stride = 1
     for node in block["nodes"]:
         if node.op_type == "Conv":
             weights.extend(node.input[1:]) # weight/bias만 모음
+            group = next((a.i for a in node.attribute if a.name == "group"), 1)
+            if group > 1:  # depthwise conv에서 stride 뽑아둠 (실행에 필요, weight shape만으론 못 얻음)
+                dw_stride = next((a.ints[0] for a in node.attribute if a.name == "strides"), 1)
     fused_node = onnx.helper.make_node(
         op_type = "Inverted_residual",
         inputs = [block["nodes"][0].input[0]] + weights,
         outputs = [block["nodes"][-1].output[0]],
-        domain = "com.npu_compiler",
+        domain = domain,
         block_type = block["type"],
+        dw_stride = dw_stride,
     )
     return fused_node
 
