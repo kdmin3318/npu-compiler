@@ -48,3 +48,37 @@ def build_consumer_map(graph: onnx.GraphProto) -> dict[str, list[onnx.NodeProto]
         for input_name in node.input:
             consumers.setdefault(input_name, []).append(node)
     return consumers
+
+
+def build_value_info_map(graph: onnx.GraphProto) -> dict[str, onnx.ValueInfoProto]:
+    """텐서 이름 -> shape/dtype 정보(ValueInfoProto).
+
+    graph.value_info(중간 activation들), graph.input, graph.output을 전부
+    합쳐서 하나의 조회용 딕셔너리로 만든다. (weight/bias는 여기 없고
+    graph.initializer에 TensorProto로 따로 있음 — 필요하면 별도 처리)
+    """
+    value_info_map: dict[str, onnx.ValueInfoProto] = {}
+    for vi in list(graph.value_info) + list(graph.input) + list(graph.output):
+        value_info_map[vi.name] = vi
+    return value_info_map
+
+
+_ELEM_TYPE_BYTES = {
+    onnx.TensorProto.FLOAT: 4,
+    onnx.TensorProto.FLOAT16: 2,
+    onnx.TensorProto.DOUBLE: 8,
+    onnx.TensorProto.INT8: 1,
+    onnx.TensorProto.UINT8: 1,
+    onnx.TensorProto.INT32: 4,
+    onnx.TensorProto.INT64: 8,
+}
+
+
+def tensor_bytes(name: str, value_info_map: dict[str, onnx.ValueInfoProto]) -> int:
+    """텐서 하나의 전체 크기를 byte 단위로 계산한다 (shape 곱 x dtype 크기)."""
+    vi = value_info_map[name]
+    dims = [d.dim_value for d in vi.type.tensor_type.shape.dim]
+    size = _ELEM_TYPE_BYTES[vi.type.tensor_type.elem_type]
+    for d in dims:
+        size *= d
+    return size
