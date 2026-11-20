@@ -19,7 +19,22 @@ depthwise conv는 연산 강도(arithmetic intensity)가 낮아 memory-bound가 
 타일 단위로 on-chip 버퍼 안에서만 처리하면 DRAM 트래픽이 줄어 빨라질 것이라는 가설에서 출발했습니다.
 ([docs/PLAN.md](docs/PLAN.md))
 
-## 2. 파이프라인
+## 2. 관련 연구와 이 프로젝트의 위치
+
+구현에 들어가기 전에, 같은 아이디어가 이미 있는지부터 찾아봤습니다.
+
+| 연구 | 내용 | 이 프로젝트와의 관계 |
+|---|---|---|
+| Lavin, *On the Efficiency of Convolutional Neural Networks* ([arXiv:2404.03617](https://arxiv.org/abs/2404.03617), 2024) | inverted residual 블록 전체를 하나의 커널로 묶어 중간 activation을 DRAM에 쓰지 않는 **Block Fusion**. ConvFirst 모델이 같은 정확도에서 ConvNeXt(PyTorch Inductor) 대비 약 4배 빠름 (NVIDIA A5000, fp16, batch=128) | 아이디어 자체는 같음. 차이는 두 가지: ① 특정 블록에 맞춰 손으로 짠 커널이 아니라, **그래프를 순회해 패턴을 자동 탐지하는 범용 컴파일러 패스**로 구현 ② GPU·대량 배치가 아니라 **CPU·batch=1 온디바이스 조건**에서 검증 |
+| Wu & Huang, *Data Locality Optimization of Depthwise Separable Convolutions for CNN Inference Accelerators* ([DATE 2019](https://doi.org/10.23919/DATE.2019.8715097)) | depthwise + pointwise fusion을 타일링으로 구현하고 DRAMSim2로 DRAM 트래픽 감소를 측정 | halo 타일링 커널 설계의 참고 자료 |
+| *ShortcutFusion: From TensorFlow to FPGA-based Accelerator with Reuse-aware Memory Allocation for Shortcut Data* ([arXiv:2106.08167](https://arxiv.org/abs/2106.08167), IEEE TCAS-I) | residual(shortcut) 데이터를 on-chip에서 재사용하도록 메모리를 배치해 DRAM 접근을 줄임 | Type C 블록에서 residual 입력을 다시 읽지 않는 트래픽 계산의 근거. Lavin 논문은 프리프린트라 동료 심사를 거친 이 논문과 DATE 2019로 방향을 교차 확인 |
+| *Fused-Layer CNNs for Memory-Efficient Inference on Microcontrollers* ([OpenReview](https://openreview.net/forum?id=2O8qbyxH6X)) | 공간 타일링으로 중간 feature map을 작은 메모리 안에서 처리 | 타일 단위 실행이 효과를 보는 조건(작은 on-chip 메모리)의 참고 |
+| MCUNetV2 / TinyEngine (MIT HAN Lab) | 해상도가 큰 앞쪽 단계에만 patch 기반 실행을 적용하고, 세 conv를 하나의 루프 안에서 처리하는 전용 커널 사용 | 회고(7장)에서 "범용 라이브러리를 타일마다 호출하는 방식"과 대비 |
+| *ExecuTorch* ([arXiv:2605.08195](https://arxiv.org/pdf/2605.08195)) | PyTorch 온디바이스 배포 스택. 그래프 변환 → Backend Delegate Interface(4.4절) → 실행 | 이 프로젝트의 그래프 패스는 delegate 앞단(partition/패턴 매칭), C++ 커스텀 op는 delegate가 하는 커널 실행에 해당. 다음 공부 방향 |
+
+정리하면, 이 프로젝트는 새 기법을 발명한 것이 아니라 **알려진 기법(Block Fusion)을 임의의 ONNX 모델에 자동으로 적용하는 컴파일러 패스로 직접 구현하고, 다른 조건(CPU, batch=1)에서 효과가 재현되는지 검증**하는 것을 목표로 했습니다.
+
+## 3. 파이프라인
 
 ```
 torchvision MobileNetV2
@@ -47,7 +62,7 @@ fused 그래프 (com.npu_compiler::Inverted_residual × 17)
 | B | expand → depthwise → project, residual 없음 (stride 2 또는 채널 변화) | 6 |
 | C | expand → depthwise → project → **add** (residual) | 10 |
 
-## 3. 정확성 검증
+## 4. 정확성 검증
 
 모든 구현을 랜덤 입력 5개 seed로 원본 ORT 실행 결과와 비교했습니다(`rtol=1e-3, atol=1e-4`).
 PyOp 단계에서는 최종 출력뿐 아니라 **블록 경계 텐서 18개 전부**를 비교했습니다.
@@ -71,7 +86,7 @@ PyOp 단계에서는 최종 출력뿐 아니라 **블록 경계 텐서 18개 전
 - **가중치 reorder 캐시 범위**: MobileNetV2에는 shape은 같고 가중치 값은 다른 블록이 있어서, shape을 키로 하는 전역 캐시를 쓰면
   다른 블록의 가중치를 재사용하게 됩니다. 캐시를 커널 인스턴스별로 두었습니다.
 
-## 4. 성능 결과 (wall-clock)
+## 5. 성능 결과 (wall-clock)
 
 | 구성 (224×224, n=50) | 평균 (ms) |
 |---|---|
@@ -110,7 +125,7 @@ L3를 넘게 했을 때 fused/unfused 비율이 개선돼야 합니다. 이 판�
 스레드 효과를 뺀 1스레드 실험에서는 같은 조건이 오히려 **30% 악화**됐습니다. 그래서 이 개선은 타일링에 의한 메모리 효과가 아니라
 멀티스레드 스케줄링 차이로 보는 것이 맞습니다. **L3를 넘겨도 타일링 효과는 관측되지 않았습니다.**
 
-## 5. 왜 빨라지지 않았나
+## 6. 왜 빨라지지 않았나
 
 1. **이득의 상한이 작았습니다.** 분석적 추정으로 fusion이 없애는 중간 텐서 트래픽은 224 입력 기준 약 92MB입니다.
    이 값도 Conv와 Clip 사이 텐서까지 따로 센, 실제보다 많이 잡은 값입니다.
@@ -126,21 +141,36 @@ L3를 넘게 했을 때 fused/unfused 비율이 개선돼야 합니다. 이 판�
 측정 한계: Windows VBS/Hyper-V가 켜져 있어서 VTune `memory-access`(하드웨어 이벤트 샘플링)를 쓸 수 없었습니다.
 그래서 DRAM 트래픽과 캐시 미스는 실측하지 못했고, wall-clock만 측정했습니다.
 
-## 6. 회고
+## 7. 회고
 
 - **이득만 계산하고 비용과 상한은 계산하지 않았습니다.** 분석 모델은 바이트 수만 셌고, 그 바이트가 시간으로 얼마인지,
-  캐시가 얼마나 흡수하는지, 타일링 비용은 얼마인지를 넣지 않았습니다. 5번의 2% 상한은 C++ 구현 전에 계산할 수 있었던 숫자입니다.
+  캐시가 얼마나 흡수하는지, 타일링 비용은 얼마인지를 넣지 않았습니다. 6장의 2% 상한은 C++ 구현 전에 계산할 수 있었던 숫자입니다.
   다음에는 roofline 분석으로 memory-bound인지부터 확인하고 시작하겠습니다.
 - **fusion의 단위와 구현 방식은 분리해서 봐야 합니다.** 블록 전체를 하나로 묶고 범용 라이브러리를 타일마다 호출하는 방식은 비용이 컸습니다.
   실제 타일 추론 구현(MCUNetV2/TinyEngine 등)은 세 conv를 하나의 루프 안에서 처리하는 전용 커널을 쓰고,
   patch 기반 실행도 해상도가 높은 앞쪽 단계에만 선택적으로 적용합니다.
+- **멘토가 처음부터 짚은 질문이 결국 핵심이었습니다.** 미들엔드를 끝냈을 때 멘토 피드백이
+  "하나의 custom op로 묶는 것과 실제로 중간 데이터의 메모리 이동을 줄이는 것은 구분해서 검증해야 한다", 그리고
+  "CPU가 정확성 검증용 환경인지, CPU 추론 성능 자체가 목표인지 구분하라"였습니다. 그래프 재작성(묶기)은 금방 끝났지만,
+  메모리 이동이 실제로 줄었는지는 끝까지 직접 측정하지 못했습니다. 측정 수단(하드웨어 카운터)을 먼저 확보했어야 했습니다.
 - **같은 라이브러리끼리 비교하도록 변인을 통제한 것은 효과가 있었습니다.** MLAS와 직접 비교했다면 구현 품질 차이(약 20배)와
   fusion 효과가 섞여 아무것도 결론 내릴 수 없었을 것입니다.
 
-## 7. 다음 단계
+## 8. 프로젝트를 여기서 멈춘 이유와 다음 단계
 
-이 실험에서 가장 크게 남은 질문은 "fused 커널을 실제로는 어떻게 생성하는가"입니다. 그래서 후속으로
-**ExecuTorch 같은 엣지 런타임의 NPU 백엔드가 fusion과 메모리 계획을 어떻게 구현하는지** 분석할 계획입니다.
+이 프로젝트는 **위 결론에서 의도적으로 멈췄습니다.**
+
+실험이 남긴 가장 큰 질문은 "fusion 효과를 보려면 fused 커널을 실제로 어떻게 만들어야 하는가"였습니다.
+6장에서 본 것처럼, 범용 라이브러리(oneDNN)를 타일마다 호출하는 방식으로는 이득보다 비용이 컸고,
+MCUNetV2/TinyEngine 같은 실제 구현은 세 conv를 하나의 루프로 처리하는 전용 커널과 정적 메모리 계획을 씁니다.
+이걸 제대로 하려면 **커널 생성과 메모리 계획, 즉 컴파일러 백엔드 쪽 기초**가 먼저 필요하다고 판단했습니다.
+
+그래서 여기서 타일 크기를 더 바꿔 보거나 커널을 손으로 계속 튜닝하는 대신, 방향을 바꿨습니다.
+
+- **ExecuTorch 백엔드 구조 학습**: Backend Delegate Interface(논문 4.4절)를 기준으로, 실제 NPU 백엔드가 그래프 partition,
+  fusion, 메모리 계획, 커널 lowering을 어떻게 나눠 처리하는지 분석
+- **검증 타깃 변경**: 다시 실험한다면 메모리 시간이 전체에서 큰 비중을 차지하는 타깃(작은 on-chip 메모리의 NPU/MCU)에서,
+  하드웨어 카운터로 DRAM 트래픽을 직접 잴 수 있는 환경(Linux perf 등)을 먼저 갖추고 시작
 
 ---
 
